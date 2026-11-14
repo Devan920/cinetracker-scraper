@@ -1,10 +1,8 @@
 import os
 import re
 import time
-from datetime import datetime, timedelta
 import xml.etree.ElementTree as ET
 import requests
-from bs4 import BeautifulSoup
 from supabase import create_client, Client
 
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://pblkvrybekogmweyajht.supabase.co")
@@ -16,11 +14,12 @@ if not SUPABASE_SERVICE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
 HEADERS = {
-    "User-Agent": "CineTrackerBot/2.0 (https://github.com/Devan920/cinetracker-scraper)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept-Language": "en-IN,en;q=0.9"
 }
 
-def get_imdb_2026_poster(movie_name: str):
-    """2026-ൽ ഇറങ്ങിയ സിനിമയുടെ ഒറിജിനൽ IMDb പോസ്റ്റർ മാത്രം എടുക്കുന്നു (പഴയ പടങ്ങൾ ഒഴിവാക്കും)"""
+def get_imdb_details(movie_name: str):
+    """IMDb-യിൽ നിന്ന് 2026 സിനിമയുടെ ഒറിജിനൽ പേരും HD 2:3 പോസ്റ്ററും എടുക്കുന്നു"""
     try:
         clean_q = re.sub(r'[^a-zA-Z0-9\s:]', '', movie_name).strip().lower()
         if not clean_q:
@@ -30,7 +29,6 @@ def get_imdb_2026_poster(movie_name: str):
         res = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10).json()
         
         for item in res.get("d", []):
-            # 2025 അല്ലെങ്കിൽ 2026 വർഷമുള്ള സിനിമകൾ മാത്രം എടുക്കുന്നു
             year = item.get("y", 0)
             if item.get("qid") in ["movie", "feature"] and year in [2025, 2026]:
                 raw_img = item.get("i", {}).get("imageUrl", "")
@@ -41,146 +39,144 @@ def get_imdb_2026_poster(movie_name: str):
         print(f"IMDb error for {movie_name}: {e}")
     return movie_name, ""
 
-def get_real_box_office(movie_name: str):
-    """Google News-ൽ നിന്ന് യഥാർത്ഥ ബോക്സ് ഓഫീസ് കളക്ഷൻ റിപ്പോർട്ടുകൾ മാത്രം എടുക്കുന്നു"""
-    try:
-        q = f'"{movie_name}" "box office" collection 2026'
-        rss_url = f"https://news.google.com/rss/search?q={requests.utils.quote(q)}&hl=en-IN&gl=IN&ceid=IN:en"
-        resp = requests.get(rss_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        if resp.status_code == 200:
-            root = ET.fromstring(resp.content)
-            for item in root.findall(".//item")[:6]:
-                title_el = item.find("title")
-                if title_el is not None and title_el.text:
-                    txt = title_el.text
-                    # യഥാർത്ഥ ₹ / Rs / Cr / Crore കണക്കുകൾ ഉണ്ടോ എന്ന് പരിശോധിക്കുന്നു
-                    money = re.findall(r'(?:₹|Rs\.?\s*|INR\s*)\s*([\d,\.]+)\s*(Cr|Crore|L|Lakh)', txt, re.IGNORECASE)
-                    if not money:
-                        continue
-                        
-                    day_m = re.search(r'(?i)day\s*(\d+)', txt)
-                    day_num = int(day_m.group(1)) if day_m else 1
-                    
-                    amt, unit = money[0]
-                    u = "L" if "l" in unit.lower() else "Cr"
-                    val = float(amt.replace(",", ""))
-                    
-                    if len(money) >= 2:
-                        amt2, unit2 = money[1]
-                        u2 = "L" if "l" in unit2.lower() else "Cr"
-                        return f"₹{amt} {u}", f"₹{amt2} {u2}", day_num
-                    elif "day 1" in txt.lower() or "opening" in txt.lower():
-                        return f"₹{amt} {u}", f"₹{amt} {u}", 1
-                    else:
-                        today_est = round(val * 0.15, 2)
-                        return f"₹{today_est} {u}", f"₹{amt} {u}", day_num
-    except Exception as e:
-        print(f"News error for {movie_name}: {e}")
-    return None
-
-def parse_wiki_date(date_str: str):
-    """Wikipedia ടേബിളിലെ റിലീസ് തീയതി പാഴ്സ് ചെയ്യുന്നു"""
-    clean_d = re.sub(r'\[.*?\]', '', date_str).strip()
-    for fmt in ["%d %B %Y", "%B %d, %Y", "%d %b %Y"]:
-        try:
-            return datetime.strptime(f"{clean_d} 2026", f"{fmt} %Y")
-        except:
-            try:
-                return datetime.strptime(clean_d, fmt)
-            except:
-                continue
-    return None
-
-def fetch_currently_playing_movies():
-    """ഇന്നത്തെ തീയതി വരെ (കഴിഞ്ഞ 45 ദിവസത്തിനുള്ളിൽ) റിലീസ് ആയ സിനിമകൾ മാത്രം എടുക്കുന്നു"""
-    today = datetime.now()
-    cutoff_past = today - timedelta(days=45)
+def parse_box_office_article(headline: str, description: str):
+    """വാർത്തയുടെ തലക്കെട്ടിൽ നിന്നും സമ്മറിയിൽ നിന്നും യഥാർത്ഥ Today Net, Total Net, Day എന്നിവ എടുക്കുന്നു"""
+    full_text = f"{headline} . {description}"
+    h_lower = headline.lower()
     
-    wiki_pages = [
-        ("Mollywood", "https://en.wikipedia.org/wiki/List_of_Malayalam_films_of_2026"),
-        ("Kollywood", "https://en.wikipedia.org/wiki/List_of_Tamil_films_of_2026"),
-        ("Tollywood", "https://en.wikipedia.org/wiki/List_of_Telugu_films_of_2026"),
-        ("Bollywood", "https://en.wikipedia.org/wiki/List_of_Hindi_films_of_2026"),
-        ("Sandalwood", "https://en.wikipedia.org/wiki/List_of_Kannada_films_of_2026")
+    banned = ["budget", "pre-release", "ott", "trailer", "teaser", "release date", "postponed", "salary", "remuneration", "rights", "announced", "first look", "shooting"]
+    if any(b in h_lower for b in banned):
+        return None
+
+    clean_line = re.split(r'\s+[-–|]\s+', headline)[0].strip()
+    title_split = re.split(
+        r'(?i)\s+(box office|day \d+|week \d+|weekend|collection|collects|earns|mints|crosses|beats|hits|grosses|nett|net|movie|film|review)',
+        clean_line
+    )
+    raw_title = title_split[0].strip(" :-–|\"'‘’“”")
+    raw_title = re.sub(r"^.*?'s\s+", "", raw_title).strip()
+    raw_title = re.sub(r'(?i)^(watch|exclusive|breaking|latest|update)\s*[:\-]?\s*', '', raw_title).strip()
+
+    # Day എണ്ണം കണ്ടെത്തുന്നു
+    day_m = re.search(r'(?i)day\s*(\d+)', full_text)
+    day_count = int(day_m.group(1)) if day_m else 1
+
+    # ₹ / Rs / Cr / L തുകകൾ കണ്ടെത്തുന്നു
+    money_matches = re.findall(r'(?:₹|Rs\.?\s*|INR\s*)\s*([\d,\.]+)\s*(Cr|Crore|L|Lakh)', full_text, re.IGNORECASE)
+    if not money_matches:
+        return None
+
+    parsed_vals = []
+    for amt_str, unit_str in money_matches:
+        try:
+            val = float(amt_str.replace(",", ""))
+            u = "L" if "l" in unit_str.lower() else "Cr"
+            val_in_cr = val / 100.0 if u == "L" else val
+            if 0.01 <= val_in_cr <= 1200:
+                parsed_vals.append((amt_str, u, val_in_cr))
+        except:
+            continue
+
+    if not parsed_vals:
+        return None
+
+    # ഏറ്റവും വലിയ തുക Total-ഉം, ചെറിയ തുക Today-ഉം ആയി വേർതിരിക്കുന്നു
+    sorted_by_size = sorted(parsed_vals, key=lambda x: x[2])
+    
+    if len(sorted_by_size) >= 2 and sorted_by_size[-1][2] > sorted_by_size[0][2]:
+        today_item = sorted_by_size[0]
+        total_item = sorted_by_size[-1]
+        today_net = f"₹{today_item[0]} {today_item[1]}"
+        total_net = f"₹{total_item[0]} {total_item[1]}"
+    else:
+        only_item = sorted_by_size[0]
+        total_net = f"₹{only_item[0]} {only_item[1]}"
+        if day_count == 1:
+            today_net = total_net
+        else:
+            est_day = round(only_item[2] / max(day_count, 2), 2)
+            today_net = f"₹{int(est_day * 100)} L" if est_day < 1.0 else f"₹{est_day} Cr"
+
+    return raw_title, today_net, total_net, day_count
+
+def fetch_live_movies():
+    queries = [
+        ("Mollywood", 'Malayalam "box office collection" "Day" when:10d'),
+        ("Kollywood", 'Tamil "box office collection" "Day" when:10d'),
+        ("Tollywood", 'Telugu "box office collection" "Day" when:10d'),
+        ("Bollywood", 'Bollywood "box office collection" "Day" when:10d'),
+        ("Sandalwood", 'Kannada "box office collection" "Day" when:10d'),
+        ("Hollywood", 'Hollywood India "box office collection" when:10d')
     ]
     
-    active_movies = []
-    current_month = ""
-    
-    for industry, url in wiki_pages:
+    results = {}
+    for industry, q in queries:
+        rss_url = f"https://news.google.com/rss/search?q={requests.utils.quote(q)}&hl=en-IN&gl=IN&ceid=IN:en"
         try:
-            resp = requests.get(url, headers=HEADERS, timeout=15)
+            resp = requests.get(rss_url, headers=HEADERS, timeout=15)
             if resp.status_code != 200:
                 continue
-            soup = BeautifulSoup(resp.text, "html.parser")
+            root = ET.fromstring(resp.content)
             
-            for table in soup.find_all("table", class_="wikitable"):
-                for row in table.find_all("tr")[1:]:
-                    cells = row.find_all(["td", "th"])
-                    if not cells:
-                        continue
+            for item in root.findall(".//item")[:15]:
+                title_el = item.find("title")
+                desc_el = item.find("description")
+                if title_el is None or not title_el.text:
+                    continue
+                
+                headline = title_el.text
+                desc_clean = re.sub(r'<[^>]+>', ' ', desc_el.text) if (desc_el is not None and desc_el.text) else ""
+                
+                parsed = parse_box_office_article(headline, desc_clean)
+                if not parsed:
+                    continue
                     
-                    # ആദ്യ കോളത്തിൽ മാസത്തിന്റെ പേരുണ്ടോ എന്ന് നോക്കുന്നു (ഉദാ: OCT, NOV)
-                    first_txt = cells[0].get_text(strip=True).upper()
-                    if first_txt in ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"]:
-                        current_month = first_txt
+                raw_title, today_net, total_net, day_count = parsed
+                if len(raw_title) < 2 or len(raw_title) > 35 or len(raw_title.split()) > 5:
+                    continue
+                if any(w in raw_title.lower() for w in ["top 10", "top 5", "box office", "records", "highest", "upcoming"]):
+                    continue
                     
-                    # റിലീസ് തീയതി ചെക്ക് ചെയ്യുന്നു
-                    row_text = " ".join(c.get_text(" ", strip=True) for c in cells[:3])
-                    day_match = re.search(r'\b(\d{1,2})\b', row_text)
-                    
-                    is_currently_playing = False
-                    if current_month in ["OCT", "NOV"] and day_match:
-                        try:
-                            rel_date = datetime.strptime(f"{day_match.group(1)} {current_month} 2026", "%d %b %Y")
-                            # ഇന്നത്തേക്കാൾ മുമ്പ് റിലീസ് ആയതും (അപ്കമിംഗ് അല്ല), 45 ദിവസത്തിനുള്ളിൽ ഉള്ളതും മാത്രം!
-                            if cutoff_past <= rel_date <= today:
-                                is_currently_playing = True
-                        except:
-                            pass
-                    
-                    if is_currently_playing:
-                        italic = row.find("i")
-                        if italic:
-                            m_name = italic.get_text(strip=True)
-                            if 2 <= len(m_name) <= 35:
-                                active_movies.append({"raw_title": m_name, "industry": industry})
+                key = raw_title.lower()
+                if key not in results:
+                    results[key] = {
+                        "raw_title": raw_title,
+                        "industry": industry,
+                        "today_net": today_net,
+                        "total_net": total_net,
+                        "day_count": day_count
+                    }
         except Exception as e:
-            print(f"Wiki error [{industry}]: {e}")
+            print(f"Error [{industry}]: {e}")
             
-    return active_movies
+    return list(results.values())
 
 def main():
-    movies = fetch_currently_playing_movies()
-    print(f"Found {len(movies)} currently playing movies (Released Oct-Nov 2026).")
+    movies = fetch_live_movies()
+    print(f"Found {len(movies)} active theatrical movies.")
     
     for m in movies:
-        # 1. യഥാർത്ഥ കളക്ഷൻ വാർത്ത ഉള്ള സിനിമകൾ മാത്രം എടുക്കുന്നു
-        bo_data = get_real_box_office(m["raw_title"])
-        if not bo_data:
-            print(f"Skipping (no verified box office report): {m['raw_title']}")
+        official_title, poster_url = get_imdb_details(m["raw_title"])
+        if not poster_url:
             continue
             
-        today_net, total_net, day_count = bo_data
-        official_title, poster_url = get_imdb_2026_poster(m["raw_title"])
-        
         record = {
             "title": official_title,
             "industry": m["industry"],
             "poster_url": poster_url,
-            "today_net": today_net,
-            "total_net": total_net,
-            "day_count": day_count,
-            "shows_count": "In Theatres"
+            "today_net": m["today_net"],
+            "total_net": m["total_net"],
+            "day_count": m["day_count"],
+            "shows_count": "Live Tracking"
         }
         
         try:
             supabase.table("movies_live").upsert(record, on_conflict="title").execute()
-            print(f"VERIFIED & SAVED: {official_title} [{m['industry']}] | Today: {today_net} | Total: {total_net}")
+            print(f"SAVED: {official_title} [{m['industry']}] | Today: {m['today_net']} | Total: {m['total_net']}")
         except Exception as e:
             print(f"Supabase error: {e}")
             
-        time.sleep(0.25)
+        time.sleep(0.2)
 
 if __name__ == "__main__":
     main()
